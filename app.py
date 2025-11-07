@@ -1,206 +1,171 @@
+import os
+import requests
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+
+# 引入 LINE Bot SDK
+from linebot import (
+    LineBotApi, WebhookHandler
+)
+from linebot.exceptions import (
+    InvalidSignatureError
+)
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
-    QuickReply, QuickReplyButton, MessageAction
 )
-import requests
-from datetime import datetime
-import os
 
 app = Flask(__name__)
 
-# ========== 環境變數設定 ==========
-# 請在 Render 的環境變數中設定這些值
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-CWA_API_KEY = os.environ.get('CWA_API_KEY')
+# --- 讀取環境變數 ---
+# 警告：請確保 Render 上的 KEY 名稱與這裡的字串「完全一致」
+try:
+    LINE_CHANNEL_ACCESS_TOKEN = os.environ['LINE_CHANNEL_ACCESS_TOKEN']
+    LINE_CHANNEL_SECRET = os.environ['LINE_CHANNEL_SECRET']
+    CWA_API_KEY = os.environ['CWA_API_KEY']
+except KeyError as e:
+    # 偵測到環境變數缺失，在日誌中印出明確錯誤
+    print(f"錯誤：環境變數 {e} 尚未設定。")
+    print("請檢查 Render > Environment 頁面是否已設定所有必要的 KEY。")
+    # 讓程式在啟動時就失敗，以便在 Logs 中看到錯誤
+    raise ValueError(f"環境變數 {e} 尚未設定")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# --- 初始化 LINE Bot ---
+try:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    print("LINE Bot API 和 WebhookHandler 初始化成功。")
+except Exception as e:
+    print(f"LINE Bot 初始化失敗: {e}")
+    raise e
 
-# ========== 台灣縣市列表 ==========
-TAIWAN_CITIES = [
-    "臺北市", "新北市", "桃園市", "臺中市", "臺南市", "高雄市",
-    "基隆市", "新竹市", "嘉義市", "新竹縣", "苗栗縣", "彰化縣",
-    "南投縣", "雲林縣", "嘉義縣", "屏東縣", "宜蘭縣", "花蓮縣",
-    "臺東縣", "澎湖縣", "金門縣", "連江縣"
-]
-
-# ========== 天氣查詢函式 ==========
-
-def get_weather_forecast(city="臺南市"):
-    """取得指定縣市的天氣預報"""
-    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-091"
-    
-    params = {
-        "Authorization": CWA_API_KEY,
-        "locationName": city,
-        "elementName": "MinT,MaxT,Wx,PoP12h"
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-        
-        if response.status_code == 200 and data.get('success') == 'true':
-            return parse_weather_data(data, city)
-        else:
-            error_msg = data.get('message', '未知錯誤')
-            return f"❌ API 查詢失敗：{error_msg}"
-    
-    except requests.exceptions.Timeout:
-        return "❌ 查詢逾時，請稍後再試"
-    except Exception as e:
-        return f"❌ 發生錯誤：{str(e)}"
-
-
-def parse_weather_data(data, city):
-    """解析天氣資料並格式化"""
-    try:
-        locations = data.get('records', {}).get('locations', [])
-        if not locations:
-            return f"❌ 找不到 {city} 的天氣資料"
-        
-        location = locations[0].get('location', [])
-        if not location:
-            return f"❌ {city} 資料格式錯誤"
-        
-        weather_elements = location[0].get('weatherElement', [])
-        
-        # 整理資料
-        weather_info = {}
-        for element in weather_elements:
-            element_name = element['elementName']
-            weather_info[element_name] = element['time']
-        
-        # 建立訊息
-        message = f"☀️ {city} 未來一週天氣\n"
-        message += f"📅 查詢時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        message += "=" * 25 + "\n\n"
-        
-        # 取前14筆資料（約7天，每12小時一筆）
-        num_forecasts = min(14, len(weather_info.get('Wx', [])))
-        
-        for i in range(num_forecasts):
-            if i >= len(weather_info['Wx']):
-                break
-                
-            start_time = weather_info['Wx'][i]['startTime']
-            date_obj = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            
-            # 格式化日期時間
-            weekday = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
-            date_str = date_obj.strftime(f'%m/%d({weekday}) %H:%M')
-            
-            wx = weather_info['Wx'][i]['elementValue'][0]['value']
-            min_t = weather_info['MinT'][i]['elementValue'][0]['value']
-            max_t = weather_info['MaxT'][i]['elementValue'][0]['value']
-            pop = weather_info['PoP12h'][i]['elementValue'][0]['value']
-            
-            # 選擇天氣圖示
-            weather_icon = get_weather_icon(wx)
-            
-            message += f"📆 {date_str}\n"
-            message += f"{weather_icon} {wx}\n"
-            message += f"🌡️ {min_t}°C ~ {max_t}°C\n"
-            message += f"💧 降雨 {pop}%\n"
-            message += "-" * 20 + "\n"
-        
-        return message
-        
-    except Exception as e:
-        return f"❌ 資料解析錯誤：{str(e)}"
-
-
-def get_weather_icon(weather_desc):
-    """根據天氣描述回傳對應的 emoji"""
-    if "晴" in weather_desc:
-        return "☀️"
-    elif "雨" in weather_desc:
-        return "🌧️"
-    elif "雲" in weather_desc or "陰" in weather_desc:
-        return "☁️"
-    elif "雷" in weather_desc:
-        return "⛈️"
-    else:
-        return "🌤️"
-
-
-# ========== LINE Bot Webhook ==========
-
+# --- Webhook 路由 ---
+# 這是 LINE 傳送訊息來的唯一入口
 @app.route("/callback", methods=['POST'])
 def callback():
-    """LINE Webhook 接收訊息"""
+    # 取得 X-Line-Signature 標頭值
     signature = request.headers['X-Line-Signature']
+    
+    # 取得請求主體 (request body)
+    # 關鍵：必須以 as_text=True 取得原始文字
     body = request.get_data(as_text=True)
     
+    # 在日誌中印出收到的原始內容 (方便除錯)
+    print("--- 收到 LINE Webhook 請求 ---")
+    print(f"Request Body: {body}")
+    print(f"Signature: {signature}")
+    print("-----------------------------")
+
+    # 驗證簽章
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        abort(400)
-    
-    return 'OK'
+        # 簽章驗證失敗
+        print("簽章驗證失敗 (InvalidSignatureError)！")
+        print("請立刻檢查：")
+        print("1. Render 上的 'LINE_CHANNEL_SECRET' 是否與 LINE 後台完全一致？")
+        print("2. 複製貼上時，是否有多餘的「空白字元」？")
+        abort(400) # 回應 400 錯誤
+    except Exception as e:
+        # 其他錯誤
+        print(f"處理訊息時發生未預期的錯誤: {e}")
+        abort(500) # 回應 500 錯誤
 
+    return 'OK' # 回應 200 OK
 
+# --- 處理文字訊息 ---
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    """處理使用者訊息"""
-    user_message = event.message.text.strip()
+def handle_text_message(event):
+    user_message = event.message.text
+    reply_token = event.reply_token
     
-    # 判斷使用者輸入
-    if user_message in ["天氣", "查天氣", "weather"]:
-        # 顯示縣市快速選單
-        quick_reply_buttons = []
-        for city in TAIWAN_CITIES[:13]:  # LINE 快速回覆最多 13 個選項
-            quick_reply_buttons.append(
-                QuickReplyButton(
-                    action=MessageAction(label=city, text=city)
-                )
-            )
+    print(f"收到來自 {event.source.user_id} 的訊息: {user_message}")
+
+    # 簡單的關鍵字判斷
+    if "天氣" in user_message:
+        # 嘗試從訊息中提取地名
+        location = user_message.replace("天氣", "").strip()
         
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(
-                text="請選擇要查詢的縣市：",
-                quick_reply=QuickReply(items=quick_reply_buttons)
-            )
-        )
-    
-    elif user_message in TAIWAN_CITIES:
-        # 查詢該縣市天氣
-        weather_info = get_weather_forecast(user_message)
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=weather_info)
-        )
+        if not location:
+            # 如果使用者只說 "天氣"，給予提示
+            reply_text = "請告訴我要查詢哪個縣市的天氣喔！\n例如：「臺北天氣」"
+        else:
+            # 呼叫 CWA API 查詢天氣
+            print(f"正在查詢「{location}」的天氣...")
+            weather_data = get_cwa_weather(location, CWA_API_KEY)
+            reply_text = weather_data
     
     else:
-        # 預設回應
-        help_text = (
-            "🌤️ 天氣查詢小幫手\n\n"
-            "請輸入「天氣」來查詢天氣預報\n\n"
-            "📍 支援台灣所有縣市\n"
-            "📅 提供未來一週預報\n"
-            "🌡️ 包含溫度、天氣、降雨機率"
-        )
+        # 非天氣關鍵字的回應
+        reply_text = f"您好！這是一個天氣機器人。\n\n請試著輸入「[縣市名稱]天氣」，例如：「高雄天氣」。"
+
+    # 回傳訊息給使用者
+    try:
         line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=help_text)
+            reply_token,
+            TextSendMessage(text=reply_text)
         )
+        print("成功回覆訊息。")
+    except Exception as e:
+        print(f"回覆訊息時發生錯誤: {e}")
 
+# --- 輔助函式：呼叫中央氣象署 CWA API ---
+def get_cwa_weather(location_name, api_key):
+    # 使用 CWA 36小時天氣預報 API
+    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001"
+    
+    params = {
+        'Authorization': api_key,
+        'locationName': location_name,
+        'elementName': 'Wx,PoP,MinT,MaxT,CI', # 天氣現象, 降雨機率, 最低溫, 最高溫, 舒適度
+        'sort': 'time'
+    }
 
-# ========== 健康檢查端點 ==========
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status() # 如果 API 回傳 4xx or 5xx，觸發錯誤
+        data = response.json()
 
-@app.route("/", methods=['GET'])
-def health_check():
-    """健康檢查端點"""
-    return "LINE Weather Bot is running! 🌤️"
+        if not data.get('success'):
+            return "氣象局 API 查詢失敗 (success=false)。"
 
+        # 檢查是否找到該地點
+        locations = data.get('records', {}).get('location', [])
+        if not locations:
+            return f"找不到「{location_name}」的天氣資訊。\n\n請確認是臺灣的縣市名稱 (例如：臺北、宜蘭、花蓮...)"
 
-# ========== 啟動伺服器 ==========
+        # 解析資料 (取未來 0-12 小時的預報)
+        location_data = locations[0]
+        elements = location_data['weatherElement']
+        
+        time_period = elements[0]['time'][0] # 取得第一個時段的資料
+        
+        wx = time_period['parameter']['parameterName'] # 天氣現象
+        pop = elements[1]['time'][0]['parameter']['parameterName'] # 降雨機率 %
+        min_t = elements[2]['time'][0]['parameter']['parameterName'] # 最低溫
+        max_t = elements[3]['time'][0]['parameter']['parameterName'] # 最高溫
+        ci = elements[4]['time'][0]['parameter']['parameterName'] # 舒適度
 
+        # 組合回傳訊息
+        result = (
+            f"📍 {location_name} (未來 12 小時)\n"
+            f"--------------------\n"
+            f"天氣現象：{wx}\n"
+            f"降雨機率：{pop} %\n"
+            f"溫　　度：{min_t}°C - {max_t}°C\n"
+            f"舒適程度：{ci}"
+        )
+        return result
+
+    except requests.exceptions.RequestException as e:
+        print(f"CWA API 請求失敗: {e}")
+        return "很抱歉，連線到氣象局時發生錯誤。"
+    except (KeyError, IndexError, TypeError) as e:
+        print(f"解析 CWA API 資料失敗: {e}")
+        print(f"收到的資料: {data}")
+        return "很抱歉，解析氣象局資料時發生錯誤。"
+
+# --- 啟動伺服器 ---
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 10000))
+    # Render 會使用 Gunicorn 執行，不會跑到這一段
+    # 這一段是留給 "本機" 測試 (e.g. python app.py) 用的
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
